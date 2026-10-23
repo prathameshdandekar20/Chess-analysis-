@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:chess/chess.dart' as chess_lib;
 import 'package:chess_analysis/services/stockfish_engine_service.dart';
 
 void main() {
@@ -21,6 +22,27 @@ void main() {
     print('Black MateIn: ${eval.mateIn}, BestMove: ${eval.bestMoveUci}');
     expect(eval.bestMoveUci, equals('d8h4'));
     expect(eval.mateIn, equals(-1));
+    expect(eval.scoreCp, equals(-10000.0));
+  });
+
+  test('Detects Forced Mate in 2 for White (M2)', () async {
+    // 1. Rxf7+ Rg7 2. Qxg7# (Mate in 2)
+    const fen = 'r5rk/5p1p/5R2/4Q3/8/8/PPP3PP/6K1 w - - 0 1';
+    final eval = await StockfishEngineService.instance.evaluatePosition(fen, depth: 8);
+
+    print('White MateIn: ${eval.mateIn}, BestMove: ${eval.bestMoveUci}');
+    expect(eval.bestMoveUci, equals('f6f7'));
+    expect(eval.mateIn, equals(2));
+    expect(eval.scoreCp, equals(10000.0));
+  });
+
+  test('Detects Forced Mate in 2 for Black (-M2)', () async {
+    // 1... Rxf2+ 2. Rg2 Qxg2# (Mate in 2)
+    const fen = '6k1/ppp3pp/8/8/4q3/5r2/5P1P/R5RK b - - 0 1';
+    final eval = await StockfishEngineService.instance.evaluatePosition(fen, depth: 8);
+
+    print('Black MateIn: ${eval.mateIn}, BestMove: ${eval.bestMoveUci}');
+    expect(eval.mateIn, equals(-2));
     expect(eval.scoreCp, equals(-10000.0));
   });
 

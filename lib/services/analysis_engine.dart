@@ -133,7 +133,7 @@ class AnalysisEngine {
               bestMoveUci: '',
               depth: 1,
             )
-          : await engine.evaluatePosition(fenAfter, depth: 8, moveTimeMs: 250);
+          : await engine.evaluatePosition(fenAfter, depth: 10, moveTimeMs: 250);
       lastEval = afterEval;
 
       final evalBeforeCp = beforeEval.scoreCp;

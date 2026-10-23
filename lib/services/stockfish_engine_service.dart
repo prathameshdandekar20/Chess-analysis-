@@ -107,13 +107,14 @@ class StockfishEngineService {
   }
 
   /// Evaluates a position given by FEN.
-  /// 100% detects Mate-in-1 instantly, then utilizes Stockfish or deep Alpha-Beta search.
+  /// Evaluates a position given by FEN.
+  /// Detects forced mates (M1, M2, M3, M4...) instantly or via deep Stockfish/Alpha-Beta search.
   Future<EngineEvaluation> evaluatePosition(
     String fen, {
-    int depth = 12,
-    int moveTimeMs = 450,
+    int depth = 14,
+    int moveTimeMs = 500,
   }) async {
-    // 1. FAST RULE-BASED CHECK: Detect terminal states and instant Mate-in-1
+    // 1. FAST RULE-BASED CHECK: Detect terminal states, instant Mate-in-1, and forced Mate-in-2
     final fastCheck = _checkImmediateMateOrTerminal(fen);
     if (fastCheck != null) {
       return fastCheck;
@@ -132,7 +133,7 @@ class StockfishEngineService {
     return evaluateLocal(fen, depth: 2);
   }
 
-  /// Checks if the board is already checkmate/stalemate or has an IMMEDIATE Mate-in-1
+  /// Checks if the board is already checkmate/stalemate or has an IMMEDIATE Mate-in-1 or forced Mate-in-2
   EngineEvaluation? _checkImmediateMateOrTerminal(String fen) {
     try {
       final chess = chess_lib.Chess();
@@ -160,7 +161,7 @@ class StockfishEngineService {
         );
       }
 
-      // Scan all legal moves to see if ANY move immediately delivers checkmate (Mate in 1)
+      // 1. Scan all legal moves to see if ANY move immediately delivers checkmate (Mate in 1)
       final legalMoves = chess.moves({'verbose': true});
       for (final m in legalMoves) {
         final map = m as Map;
@@ -182,6 +183,80 @@ class StockfishEngineService {
             pv: [uci],
             depth: 1,
           );
+        }
+      }
+
+      // 2. Scan checking candidate moves for guaranteed forced Mate in 2 (M2)
+      final checkingMoves = legalMoves.where((m) {
+        final map = m as Map;
+        final san = map['san'] as String? ?? '';
+        return san.contains('+') || san.contains('#');
+      }).toList();
+
+      for (final m in checkingMoves) {
+        final map = m as Map;
+        final from = map['from'] as String;
+        final to = map['to'] as String;
+        final prom = map['promotion'] as String?;
+        final uci = '$from$to${prom ?? ''}';
+
+        chess.move({'from': from, 'to': to, 'promotion': prom ?? 'q'});
+        final oppReplies = chess.moves({'verbose': true});
+
+        if (oppReplies.isNotEmpty && oppReplies.length <= 4) {
+          bool allRepliesMated = true;
+          for (final oppM in oppReplies) {
+            final oppMap = oppM as Map;
+            chess.move({
+              'from': oppMap['from'] as String,
+              'to': oppMap['to'] as String,
+              'promotion': (oppMap['promotion'] as String?) ?? 'q',
+            });
+
+            // Check if any checking reply delivers checkmate
+            final playerReplies = chess.moves({'verbose': true});
+            final candidateMates = playerReplies.where((pm) {
+              final san = (pm as Map)['san'] as String? ?? '';
+              return san.contains('+') || san.contains('#');
+            });
+            bool hasMateReply = false;
+            for (final pm in candidateMates) {
+              final pMap = pm as Map;
+              chess.move({
+                'from': pMap['from'] as String,
+                'to': pMap['to'] as String,
+                'promotion': (pMap['promotion'] as String?) ?? 'q',
+              });
+              if (chess.in_checkmate) {
+                hasMateReply = true;
+                chess.undo();
+                break;
+              }
+              chess.undo();
+            }
+
+            chess.undo(); // undo opponent move
+
+            if (!hasMateReply) {
+              allRepliesMated = false;
+              break;
+            }
+          }
+
+          chess.undo(); // undo player move
+
+          if (allRepliesMated) {
+            // Guaranteed forced Mate-in-2 found!
+            return EngineEvaluation(
+              scoreCp: isWhiteTurn ? 10000.0 : -10000.0,
+              mateIn: isWhiteTurn ? 2 : -2,
+              bestMoveUci: uci,
+              pv: [uci],
+              depth: 3,
+            );
+          }
+        } else {
+          chess.undo();
         }
       }
     } catch (_) {}
@@ -220,19 +295,26 @@ class StockfishEngineService {
 
     sub = _nativeStockfish!.stdout.listen((line) {
       if (line.startsWith('info ') && line.contains('score ')) {
+        // Only evaluate primary variation (multipv 1 or single-line search)
+        if (line.contains('multipv ') && !line.contains('multipv 1 ')) {
+          return;
+        }
+
         final tokens = line.split(' ');
         for (int i = 0; i < tokens.length; i++) {
-          if (tokens[i] == 'cp' && i + 1 < tokens.length) {
-            final parsed = double.tryParse(tokens[i + 1]);
-            if (parsed != null) {
-              currentCp = isWhiteTurn ? parsed : -parsed;
-              currentMate = null;
-            }
-          } else if (tokens[i] == 'mate' && i + 1 < tokens.length) {
+          if (tokens[i] == 'mate' && i + 1 < tokens.length) {
             final parsed = int.tryParse(tokens[i + 1]);
             if (parsed != null) {
               currentMate = isWhiteTurn ? parsed : -parsed;
               currentCp = currentMate! > 0 ? 10000.0 : -10000.0;
+            }
+          } else if (tokens[i] == 'cp' && i + 1 < tokens.length) {
+            final parsed = double.tryParse(tokens[i + 1]);
+            if (parsed != null) {
+              currentCp = isWhiteTurn ? parsed : -parsed;
+              if (!line.contains('lowerbound') && !line.contains('upperbound')) {
+                currentMate = null;
+              }
             }
           } else if (tokens[i] == 'pv' && i + 1 < tokens.length) {
             pvMoves.clear();
