@@ -1,5 +1,4 @@
 import 'dart:math';
-import 'package:flutter/foundation.dart';
 import 'package:chess/chess.dart' as chess_lib;
 import '../models/chess_move_eval.dart';
 import '../models/game_review_data.dart';
@@ -41,8 +40,7 @@ class AnalysisEngine {
     final openingName = opening?.name ?? 'Standard Chess Opening';
     final ecoCode = opening?.eco ?? 'A00';
 
-    double previousEvalCp = 0.0;
-    int? previousMate;
+    EngineEvaluation? lastEval;
 
     for (int i = 0; i < sanMoves.length; i++) {
       final san = sanMoves[i];
@@ -54,8 +52,10 @@ class AnalysisEngine {
         onProgress((i + 1) / (sanMoves.length + 1), 'Analyzing move ${i + 1}/${sanMoves.length}: $san');
       }
 
-      // 1. Get engine evaluation of position BEFORE the move
-      final beforeEval = await engine.evaluatePosition(fenBefore, depth: 10, moveTimeMs: 300);
+      // 1. Get engine evaluation of position BEFORE the move (reused from previous step if available)
+      final beforeEval = (i == 0 || lastEval == null)
+          ? await engine.evaluatePosition(fenBefore, depth: 8, moveTimeMs: 250)
+          : lastEval;
       final bestMoveUci = beforeEval.bestMoveUci;
 
       final candidateMoves = chess.moves({'verbose': true});
@@ -76,29 +76,65 @@ class AnalysisEngine {
 
       // Find played move in legal moves
       Map? playedMoveMap;
+      final cleanSan = san.replaceAll(RegExp(r'[+#]'), '');
       for (final m in candidateMoves) {
         final map = m as Map;
-        if (map['san'] == san) {
+        final mapSan = map['san'] as String? ?? '';
+        final mapClean = mapSan.replaceAll(RegExp(r'[+#]'), '');
+        if (mapSan == san || mapClean == cleanSan) {
           playedMoveMap = map;
           break;
         }
       }
 
-      // 2. Play the move
-      final success = chess.move(san);
-      if (!success || playedMoveMap == null) {
+      if (playedMoveMap == null) {
         continue;
       }
 
       final fromSquare = playedMoveMap['from'] as String;
       final toSquare = playedMoveMap['to'] as String;
+
+      // Extract moving piece type before the move is played
+      final movingPiece = chess.get(fromSquare);
+      String pieceLetter = 'p';
+      if (movingPiece != null) {
+        pieceLetter = movingPiece.type.name.toLowerCase();
+      } else if (san.isNotEmpty && 'NBRQK'.contains(san[0])) {
+        pieceLetter = san[0].toLowerCase();
+      }
+
+      // 2. Play the move
+      final actualSan = playedMoveMap['san'] as String? ?? san;
+      final success = chess.move(actualSan);
+      if (!success) {
+        continue;
+      }
+
       final pieceCaptured = playedMoveMap['captured'];
-      final pieceName = (playedMoveMap['piece'] ?? '').toString();
+      String? capLetter;
+      if (pieceCaptured != null) {
+        if (pieceCaptured is chess_lib.PieceType) {
+          capLetter = pieceCaptured.name.toLowerCase();
+        } else {
+          final s = pieceCaptured.toString().toLowerCase();
+          capLetter = s.length > 1 ? s.split('.').last[0] : s;
+        }
+      }
+
       final uci = '$fromSquare$toSquare${playedMoveMap['promotion'] ?? ''}';
       final fenAfter = chess.fen;
 
       // 3. Get engine evaluation of position AFTER the move
-      final afterEval = await engine.evaluatePosition(fenAfter, depth: 10, moveTimeMs: 300);
+      final deliveredMate = chess.in_checkmate;
+      final afterEval = deliveredMate
+          ? EngineEvaluation(
+              scoreCp: isWhite ? 10000.0 : -10000.0,
+              mateIn: 0,
+              bestMoveUci: '',
+              depth: 1,
+            )
+          : await engine.evaluatePosition(fenAfter, depth: 8, moveTimeMs: 250);
+      lastEval = afterEval;
 
       final evalBeforeCp = beforeEval.scoreCp;
       final evalAfterCp = afterEval.scoreCp;
@@ -113,21 +149,65 @@ class AnalysisEngine {
       // Check opening book
       final isBook = OpeningBookService.isBookMove(sanMoves, i);
 
-      // Detect piece sacrifice for Brilliant move
+      // Accurate Chess.com-style Piece Sacrifice & Brilliant Move (!!) Detector:
       bool isSacrifice = false;
-      if (pieceCaptured == null && (pieceName == 'n' || pieceName == 'b' || pieceName == 'r' || pieceName == 'q')) {
-        // Did we move a major/minor piece into an attacked square?
-        if (winAfter >= 65.0 && winLoss < 1.0) {
+      const piecePoints = {'p': 1, 'n': 3, 'b': 3, 'r': 5, 'q': 9, 'k': 0};
+      final pMovedVal = piecePoints[pieceLetter] ?? 0;
+      final pCapturedVal = capLetter != null ? (piecePoints[capLetter] ?? 0) : 0;
+
+      // Check opponent legal responses after our move
+      final opponentResponses = chess.moves({'verbose': true});
+      final canPieceBeCaptured = opponentResponses.any((m) => (m as Map)['to'] == toSquare);
+
+      // 1. Direct sacrifice on destination square (piece offered has higher value than what was captured)
+      if (canPieceBeCaptured && (pMovedVal - pCapturedVal >= 2)) {
+        isSacrifice = true;
+      }
+
+      // 2. Hanging major piece sacrifice elsewhere: opponent can capture Queen, Rook, or minor piece
+      if (!isSacrifice && pMovedVal >= 1) {
+        final hangingHighValuePiece = opponentResponses.any((m) {
+          final cap = (m as Map)['captured'];
+          if (cap == null) return false;
+          final capStr = (cap is chess_lib.PieceType) ? cap.name.toLowerCase() : cap.toString().toLowerCase();
+          final capChar = capStr.length > 1 ? capStr.split('.').last[0] : capStr;
+          final capVal = piecePoints[capChar] ?? 0;
+          return capVal >= 3; // Rook, Bishop, Knight, or Queen left hanging
+        });
+        if (hangingHighValuePiece) {
           isSacrifice = true;
         }
       }
 
+      // 3. Greek Gift / Queen Sacrifice with check (e.g. Bxh7+, Qxf7+) leading to winning attack/mate
+      if (!isSacrifice && (san.contains('+') || actualSan.contains('+')) && pMovedVal >= 3 && canPieceBeCaptured) {
+        isSacrifice = true;
+      }
+
+      // Check if player had mate before/after
+      final playerHadMate = mateBefore != null && (isWhite ? mateBefore > 0 : mateBefore < 0);
+      final playerStillHasMate = mateAfter != null && (isWhite ? mateAfter > 0 : mateAfter < 0);
+
+      final isWinningOrSolid = (isWhite ? evalAfterCp >= 50.0 : evalAfterCp <= -50.0) ||
+                               (mateAfter != null && (isWhite ? mateAfter > 0 : mateAfter < 0)) ||
+                               winAfter >= 50.0;
+
+      final isOptimalMove = (uci == bestMoveUci ||
+                             san == bestMoveSan ||
+                             actualSan == bestMoveSan ||
+                             winLoss <= 1.5);
+
       // Classify the move
       MoveClassification classification;
-      if (isBook) {
-        classification = MoveClassification.book;
-      } else if (isSacrifice && winLoss < 1.5 && (isWhite ? evalAfterCp >= 150 : evalAfterCp <= -150)) {
+      if (isSacrifice && isOptimalMove && isWinningOrSolid) {
+        // True Chess.com Brilliant Move (!!) 💎
         classification = MoveClassification.brilliant;
+      } else if (deliveredMate) {
+        classification = MoveClassification.best;
+      } else if (playerHadMate && !playerStillHasMate && winLoss > 15.0) {
+        classification = MoveClassification.miss; // Missed Win / Missed Mate!
+      } else if (isBook) {
+        classification = MoveClassification.book;
       } else if (uci == bestMoveUci || winLoss < 0.8) {
         // Check if it was a great critical move
         if (winBefore < 40.0 && winAfter > 60.0) {
@@ -201,9 +281,6 @@ class AnalysisEngine {
         winChanceBefore: winBefore,
         winChanceAfter: winAfter,
       ));
-
-      previousEvalCp = evalAfterCp;
-      previousMate = mateAfter;
     }
 
     final whiteAvgAcc = whiteMoveCount > 0 ? (whiteTotalAccuracy / whiteMoveCount) : 80.0;
@@ -246,8 +323,9 @@ class AnalysisEngine {
     required String openingName,
     required bool captured,
   }) {
-    final player = isWhite ? 'White' : 'Black';
-    final evalStr = (evalAfterCp / 100.0).toStringAsFixed(1);
+    if (san.contains('#')) {
+      return '👑 Checkmate delivered! $san finishes the game with complete precision.';
+    }
 
     switch (classification) {
       case MoveClassification.brilliant:
@@ -270,9 +348,9 @@ class AnalysisEngine {
       case MoveClassification.mistake:
         return '❓ Mistake! $san allows the opponent counterplay. Best was $bestMoveSan.';
       case MoveClassification.blunder:
-        return '❌ Blunder! $san severely damages your position. You should have played $bestMoveSan.';
+        return '❌ Blunder! $san damages your position. You should have played $bestMoveSan.';
       case MoveClassification.miss:
-        return '⭕ Missed win! You had a decisive tactical advantage with $bestMoveSan, but played $san.';
+        return '⭕ Missed win! You had a decisive winning move with $bestMoveSan, but played $san.';
     }
   }
 }

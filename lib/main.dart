@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'services/stockfish_engine_service.dart';
+import 'services/coach_voice_service.dart';
 import 'ui/theme/chess_theme.dart';
 import 'ui/screens/main_navigation_screen.dart';
 
@@ -17,8 +18,9 @@ void main() async {
     ),
   );
 
-  // Initialize Stockfish engine asynchronously
+  // Initialize Stockfish engine and Coach Voice TTS asynchronously
   StockfishEngineService.instance.init();
+  CoachVoiceService.instance.init();
 
   runApp(const ChessAnalysisApp());
 }

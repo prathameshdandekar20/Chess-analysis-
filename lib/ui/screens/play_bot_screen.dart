@@ -5,6 +5,8 @@ import '../../models/bot_profile.dart';
 import '../../services/stockfish_engine_service.dart';
 import '../../services/sound_service.dart';
 import '../../services/analysis_engine.dart';
+import '../../services/coach_voice_service.dart';
+import '../../models/coach_profile.dart';
 import '../theme/chess_theme.dart';
 import '../widgets/chess_board_widget.dart';
 import '../widgets/eval_bar_widget.dart';
@@ -38,6 +40,12 @@ class _PlayBotScreenState extends State<PlayBotScreen> {
   void initState() {
     super.initState();
     _startNewGame();
+  }
+
+  @override
+  void dispose() {
+    CoachVoiceService.instance.stop();
+    super.dispose();
   }
 
   void _startNewGame() {
@@ -223,6 +231,11 @@ class _PlayBotScreenState extends State<PlayBotScreen> {
         title = 'Draw 🤝';
         msg = 'The game ended in a draw.';
       }
+
+      CoachVoiceService.instance.speakCommentary(
+        commentary: msg,
+        personality: CoachPersonality.classic,
+      );
 
       showDialog(
         context: context,

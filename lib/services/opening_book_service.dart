@@ -89,7 +89,7 @@ class OpeningBookService {
     if (moveIndex >= sanMoves.length) return false;
     final prefix = sanMoves.sublist(0, moveIndex + 1).join(' ');
     for (final op in _openings) {
-      if (op.moves.startsWith(prefix) || prefix.startsWith(op.moves)) {
+      if (op.moves.startsWith(prefix)) {
         return true;
       }
     }

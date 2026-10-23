@@ -1,10 +1,11 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:chess/chess.dart' as chess_lib;
 import '../../services/stockfish_engine_service.dart';
 import '../../services/sound_service.dart';
 import '../../services/analysis_engine.dart';
+import '../../services/coach_voice_service.dart';
+import '../../models/coach_profile.dart';
 import '../theme/chess_theme.dart';
 import '../widgets/chess_board_widget.dart';
 import '../widgets/eval_bar_widget.dart';
@@ -48,6 +49,7 @@ class _LiveAnalysisScreenState extends State<LiveAnalysisScreen> {
   @override
   void dispose() {
     _debounceTimer?.cancel();
+    CoachVoiceService.instance.stop();
     super.dispose();
   }
 
@@ -73,6 +75,17 @@ class _LiveAnalysisScreenState extends State<LiveAnalysisScreen> {
         _pv = eval.pv;
         _isAnalyzing = false;
       });
+
+      // Announce checkmate in voice if found
+      if (eval.mateIn != null && eval.mateIn != 0) {
+        final mateText = eval.mateIn! > 0
+            ? 'Forced checkmate in ${eval.mateIn!.abs()} moves!'
+            : 'Warning! Forced checkmate against you in ${eval.mateIn!.abs()} moves!';
+        CoachVoiceService.instance.speakCommentary(
+          commentary: mateText,
+          personality: CoachPersonality.classic,
+        );
+      }
     });
   }
 
@@ -241,6 +254,18 @@ class _LiveAnalysisScreenState extends State<LiveAnalysisScreen> {
         title: const Text('Live Stockfish Analysis'),
         actions: [
           IconButton(
+            icon: Icon(
+              CoachVoiceService.instance.isMuted ? Icons.volume_off_rounded : Icons.volume_up_rounded,
+              color: CoachVoiceService.instance.isMuted ? Colors.white38 : ChessTheme.brandGreen,
+            ),
+            tooltip: CoachVoiceService.instance.isMuted ? 'Unmute Voice' : 'Mute Voice',
+            onPressed: () {
+              setState(() {
+                CoachVoiceService.instance.toggleMute();
+              });
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.flip_camera_android_rounded),
             tooltip: 'Flip Board',
             onPressed: () => setState(() => _isFlipped = !_isFlipped),
@@ -315,14 +340,18 @@ class _LiveAnalysisScreenState extends State<LiveAnalysisScreen> {
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                           decoration: BoxDecoration(
-                            color: ChessTheme.surfaceElevated,
+                            color: _mateIn != null ? const Color(0xFFE5A93C) : ChessTheme.surfaceElevated,
                             borderRadius: BorderRadius.circular(6),
                           ),
                           child: Text(
                             _mateIn != null
-                                ? (_mateIn! > 0 ? 'M${_mateIn!.abs()}' : '-M${_mateIn!.abs()}')
+                                ? (_mateIn == 0 ? 'Checkmate' : (_mateIn! > 0 ? 'M${_mateIn!.abs()}' : '-M${_mateIn!.abs()}'))
                                 : '${(_evalCp / 100.0) >= 0 ? "+" : ""}${(_evalCp / 100.0).toStringAsFixed(2)}',
-                            style: const TextStyle(fontWeight: FontWeight.w900, color: Colors.white, fontSize: 13),
+                            style: TextStyle(
+                              fontWeight: FontWeight.w900,
+                              color: _mateIn != null ? Colors.black : Colors.white,
+                              fontSize: 13,
+                            ),
                           ),
                         ),
                       ],

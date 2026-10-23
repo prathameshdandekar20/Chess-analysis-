@@ -1,15 +1,13 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import 'package:stockfish_chess_engine/stockfish_chess_engine.dart';
 import 'package:stockfish_chess_engine/stockfish_chess_engine_state.dart';
 import 'package:chess/chess.dart' as chess_lib;
 
 class EngineEvaluation {
   final double scoreCp; // Centipawns from White's perspective (+100 = +1.0)
-  final int? mateIn; // Positive: White wins in X moves; Negative: Black wins
+  final int? mateIn; // Positive: White wins in X moves; Negative: Black wins; 0: Already checkmate
   final String bestMoveUci;
   final List<String> pv; // Principal Variation
   final int depth;
@@ -22,9 +20,12 @@ class EngineEvaluation {
     this.depth = 12,
   });
 
-  /// Evaluates win percentage from White's perspective using the exact official Lichess/CAPS sigmoid model
+  /// Evaluates win percentage from White's perspective using Kenneth Regan / CAPS sigmoid model
   double get whiteWinChance {
     if (mateIn != null) {
+      if (mateIn == 0) {
+        return scoreCp > 0 ? 100.0 : 0.0;
+      }
       return mateIn! > 0 ? 100.0 : 0.0;
     }
     // Exact Lichess/Kenneth Regan model: 50 + 50 * (2 / (1 + exp(-0.00368208 * scoreCp)) - 1)
@@ -32,22 +33,30 @@ class EngineEvaluation {
   }
 }
 
-/// Service managing real Stockfish UCI communication with robust fallbacks
+/// Service managing real Stockfish UCI communication and high-speed rule-based mate detection
 class StockfishEngineService {
   static final StockfishEngineService instance = StockfishEngineService._internal();
 
   StockfishEngineService._internal();
 
   Stockfish? _nativeStockfish;
-  StreamSubscription<String>? _stdoutSub;
   bool _isNativeReady = false;
   bool _initAttempted = false;
-  bool enableCloudEval = false; // Default to 100% offline local computation
 
   final Completer<void> _readyCompleter = Completer<void>();
-  Future<void> get whenReady => _readyCompleter.future;
+  Future<void> get whenReady async {
+    if (!_initAttempted) {
+      unawaited(init());
+    }
+    try {
+      await _readyCompleter.future.timeout(const Duration(milliseconds: 1200), onTimeout: () {});
+    } catch (_) {}
+  }
 
   bool get isUsingNativeEngine => _isNativeReady;
+
+  // Queue to serialize commands sent to the native UCI engine
+  Future<void> _uciLock = Future.value();
 
   /// Initializes Stockfish engine
   Future<void> init() async {
@@ -58,29 +67,29 @@ class StockfishEngineService {
       debugPrint('[StockfishService] Initializing Stockfish engine...');
       _nativeStockfish = Stockfish();
 
-      _stdoutSub = _nativeStockfish!.stdout.listen((line) {
-        // debugPrint('[Stockfish UCI] $line');
-      });
-
-      _nativeStockfish!.state.addListener(() {
-        if (_nativeStockfish?.state.value == StockfishState.ready) {
-          _isNativeReady = true;
-          _nativeStockfish!.stdin = 'uci';
-          _nativeStockfish!.stdin = 'isready';
-          if (!_readyCompleter.isCompleted) {
-            _readyCompleter.complete();
+      if (_nativeStockfish?.state.value == StockfishState.ready) {
+        _isNativeReady = true;
+        _sendUciSetup();
+        if (!_readyCompleter.isCompleted) _readyCompleter.complete();
+      } else {
+        _nativeStockfish?.state.addListener(() {
+          if (_nativeStockfish?.state.value == StockfishState.ready && !_isNativeReady) {
+            _isNativeReady = true;
+            _sendUciSetup();
+            if (!_readyCompleter.isCompleted) _readyCompleter.complete();
+            debugPrint('[StockfishService] Native Stockfish engine ready!');
           }
-          debugPrint('[StockfishService] Native Stockfish engine ready!');
+        });
+      }
+
+      // Max timeout for native isolate initialization
+      Timer(const Duration(milliseconds: 2500), () {
+        if (!_readyCompleter.isCompleted) {
+          _readyCompleter.complete();
         }
       });
-
-      // Wait a short time for native engine
-      await Future.delayed(const Duration(milliseconds: 600));
-      if (!_readyCompleter.isCompleted) {
-        _readyCompleter.complete();
-      }
     } catch (e) {
-      debugPrint('[StockfishService] Native Stockfish unavailable on this platform ($e). Using built-in engine.');
+      debugPrint('[StockfishService] Native Stockfish init failed ($e). Using fallback engine.');
       _isNativeReady = false;
       if (!_readyCompleter.isCompleted) {
         _readyCompleter.complete();
@@ -88,57 +97,111 @@ class StockfishEngineService {
     }
   }
 
+  void _sendUciSetup() {
+    try {
+      _nativeStockfish?.stdin = 'uci';
+      _nativeStockfish?.stdin = 'setoption name Threads value 2';
+      _nativeStockfish?.stdin = 'setoption name Hash value 16';
+      _nativeStockfish?.stdin = 'isready';
+    } catch (_) {}
+  }
+
   /// Evaluates a position given by FEN.
-  /// Uses native Stockfish if ready, else cloud-eval or built-in minimax engine.
+  /// 100% detects Mate-in-1 instantly, then utilizes Stockfish or deep Alpha-Beta search.
   Future<EngineEvaluation> evaluatePosition(
     String fen, {
     int depth = 12,
     int moveTimeMs = 450,
   }) async {
+    // 1. FAST RULE-BASED CHECK: Detect terminal states and instant Mate-in-1
+    final fastCheck = _checkImmediateMateOrTerminal(fen);
+    if (fastCheck != null) {
+      return fastCheck;
+    }
+
     await whenReady;
 
     if (_isNativeReady && _nativeStockfish != null) {
       try {
-        return await _evaluateWithNativeStockfish(fen, depth: depth, moveTimeMs: moveTimeMs);
+        return await _enqueueUci(() => _evaluateWithNativeStockfish(fen, depth: depth, moveTimeMs: moveTimeMs));
       } catch (e) {
-        debugPrint('[StockfishService] Native eval error ($e), falling back');
+        debugPrint('[StockfishService] Native eval error ($e), falling back to local engine');
       }
     }
 
-    // Try cloud eval if available, else built-in minimax
-    final cloudEval = await _tryCloudEval(fen);
-    if (cloudEval != null) {
-      return cloudEval;
-    }
-
-    return _evaluateWithLocalEngine(fen, depth: min(depth, 4));
+    return evaluateLocal(fen, depth: 2);
   }
 
-  /// Asks Stockfish for the best move (used when playing against bot)
-  Future<String?> getBestMove(
-    String fen, {
-    int skillLevel = 20,
-    int depth = 10,
-    int moveTimeMs = 500,
-    double blunderChance = 0.0,
-  }) async {
-    // If bot has a blunder chance, occasionally make a random legal move
-    if (blunderChance > 0 && Random().nextDouble() < blunderChance) {
+  /// Checks if the board is already checkmate/stalemate or has an IMMEDIATE Mate-in-1
+  EngineEvaluation? _checkImmediateMateOrTerminal(String fen) {
+    try {
       final chess = chess_lib.Chess();
-      if (chess.load(fen)) {
-        final moves = chess.moves({'verbose': true});
-        if (moves.isNotEmpty) {
-          moves.shuffle();
-          final m = moves.first as Map;
-          return '${m['from']}${m['to']}${m['promotion'] ?? ''}';
+      if (!chess.load(fen)) return null;
+
+      final isWhiteTurn = chess.turn == chess_lib.Color.WHITE;
+
+      // Already in checkmate
+      if (chess.in_checkmate) {
+        return EngineEvaluation(
+          scoreCp: isWhiteTurn ? -10000.0 : 10000.0,
+          mateIn: 0,
+          bestMoveUci: '',
+          depth: 1,
+        );
+      }
+
+      // In stalemate / draw
+      if (chess.in_draw) {
+        return const EngineEvaluation(
+          scoreCp: 0.0,
+          mateIn: null,
+          bestMoveUci: '',
+          depth: 1,
+        );
+      }
+
+      // Scan all legal moves to see if ANY move immediately delivers checkmate (Mate in 1)
+      final legalMoves = chess.moves({'verbose': true});
+      for (final m in legalMoves) {
+        final map = m as Map;
+        final from = map['from'] as String;
+        final to = map['to'] as String;
+        final prom = map['promotion'] as String?;
+        final uci = '$from$to${prom ?? ''}';
+
+        chess.move({'from': from, 'to': to, 'promotion': prom ?? 'q'});
+        final deliversMate = chess.in_checkmate;
+        chess.undo();
+
+        if (deliversMate) {
+          // Instant Mate-in-1 found!
+          return EngineEvaluation(
+            scoreCp: isWhiteTurn ? 10000.0 : -10000.0,
+            mateIn: isWhiteTurn ? 1 : -1,
+            bestMoveUci: uci,
+            pv: [uci],
+            depth: 1,
+          );
         }
       }
-    }
-
-    final eval = await evaluatePosition(fen, depth: depth, moveTimeMs: moveTimeMs);
-    return eval.bestMoveUci.isNotEmpty ? eval.bestMoveUci : null;
+    } catch (_) {}
+    return null;
   }
 
+  /// Serializes UCI commands so parallel queries never cross-talk
+  Future<T> _enqueueUci<T>(Future<T> Function() task) async {
+    final prev = _uciLock;
+    final completer = Completer<void>();
+    _uciLock = completer.future;
+    try {
+      await prev;
+      return await task();
+    } finally {
+      completer.complete();
+    }
+  }
+
+  /// Evaluates position with native C++ Stockfish over UCI
   Future<EngineEvaluation> _evaluateWithNativeStockfish(
     String fen, {
     required int depth,
@@ -150,20 +213,18 @@ class StockfishEngineService {
     String bestMove = '';
     final pvMoves = <String>[];
 
+    final isWhiteTurn = fen.split(' ')[1] == 'w';
+
     late StreamSubscription<String> sub;
     Timer? timeoutTimer;
 
-    final isWhiteTurn = fen.split(' ')[1] == 'w';
-
     sub = _nativeStockfish!.stdout.listen((line) {
-      // Parse info score cp 120 depth 10 pv e2e4 e7e5
       if (line.startsWith('info ') && line.contains('score ')) {
         final tokens = line.split(' ');
         for (int i = 0; i < tokens.length; i++) {
           if (tokens[i] == 'cp' && i + 1 < tokens.length) {
             final parsed = double.tryParse(tokens[i + 1]);
             if (parsed != null) {
-              // Stockfish outputs score relative to side to move
               currentCp = isWhiteTurn ? parsed : -parsed;
               currentMate = null;
             }
@@ -204,7 +265,7 @@ class StockfishEngineService {
       }
     });
 
-    timeoutTimer = Timer(Duration(milliseconds: moveTimeMs + 600), () {
+    timeoutTimer = Timer(Duration(milliseconds: moveTimeMs + 800), () {
       if (!completer.isCompleted) {
         sub.cancel();
         completer.complete(EngineEvaluation(
@@ -223,71 +284,53 @@ class StockfishEngineService {
     return completer.future;
   }
 
-  /// Queries Lichess Cloud Evaluation if enabled
-  Future<EngineEvaluation?> _tryCloudEval(String fen) async {
-    if (!enableCloudEval) return null;
-    try {
-      final encodedFen = Uri.encodeComponent(fen);
-      final url = Uri.parse('https://lichess.org/api/cloud-eval?fen=$encodedFen&multiPv=1');
-      final res = await http.get(url).timeout(const Duration(milliseconds: 700));
-
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-        final pvs = data['pvs'] as List?;
-        if (pvs != null && pvs.isNotEmpty) {
-          final top = pvs.first;
-          final cp = top['cp'] != null ? (top['cp'] as num).toDouble() : null;
-          final mate = top['mate'] != null ? (top['mate'] as num).toInt() : null;
-          final movesStr = top['moves'] as String? ?? '';
-          final pvList = movesStr.split(' ').where((s) => s.isNotEmpty).toList();
-          final bestUci = pvList.isNotEmpty ? pvList.first : '';
-
-          final isWhiteTurn = fen.split(' ')[1] == 'w';
-          final adjustedCp = cp != null ? (isWhiteTurn ? cp : -cp) : (mate != null && mate > 0 ? 10000.0 : -10000.0);
-          final adjustedMate = mate != null ? (isWhiteTurn ? mate : -mate) : null;
-
-          return EngineEvaluation(
-            scoreCp: adjustedCp,
-            mateIn: adjustedMate,
-            bestMoveUci: bestUci,
-            pv: pvList,
-            depth: data['depth'] ?? 20,
-          );
+  /// Asks Stockfish for the best move (used when playing against bot)
+  Future<String?> getBestMove(
+    String fen, {
+    int skillLevel = 20,
+    int depth = 10,
+    int moveTimeMs = 500,
+    double blunderChance = 0.0,
+  }) async {
+    // If bot has a blunder chance, occasionally make a random legal move
+    if (blunderChance > 0 && Random().nextDouble() < blunderChance) {
+      final chess = chess_lib.Chess();
+      if (chess.load(fen)) {
+        final moves = chess.moves({'verbose': true});
+        if (moves.isNotEmpty) {
+          moves.shuffle();
+          final m = moves.first as Map;
+          return '${m['from']}${m['to']}${m['promotion'] ?? ''}';
         }
       }
-    } catch (_) {
-      // Network error or timeout, silently continue to local engine
     }
-    return null;
+
+    final eval = await evaluatePosition(fen, depth: depth, moveTimeMs: moveTimeMs);
+    return eval.bestMoveUci.isNotEmpty ? eval.bestMoveUci : null;
   }
 
-  /// Built-in Alpha-Beta evaluation engine with PeSTO positional tables
-  EngineEvaluation _evaluateWithLocalEngine(String fen, {int depth = 3}) {
+  /// Built-in Alpha-Beta evaluation engine with precise mate-distance calculation
+  EngineEvaluation evaluateLocal(String fen, {int depth = 3}) {
+    // Instant terminal/mate-in-1 check
+    final fast = _checkImmediateMateOrTerminal(fen);
+    if (fast != null) return fast;
+
     final chess = chess_lib.Chess();
     if (!chess.load(fen)) {
       return const EngineEvaluation(scoreCp: 0, bestMoveUci: '');
     }
 
     final isWhiteTurn = chess.turn == chess_lib.Color.WHITE;
-
-    if (chess.in_checkmate) {
-      return EngineEvaluation(
-        scoreCp: isWhiteTurn ? -10000 : 10000,
-        mateIn: isWhiteTurn ? -1 : 1,
-        bestMoveUci: '',
-      );
-    }
-    if (chess.in_draw) {
-      return const EngineEvaluation(scoreCp: 0, bestMoveUci: '');
-    }
-
     final moves = chess.moves({'verbose': true});
     if (moves.isEmpty) {
       return const EngineEvaluation(scoreCp: 0, bestMoveUci: '');
     }
 
     String bestMoveUci = '';
-    double bestScore = isWhiteTurn ? -999999 : 999999;
+    double bestScore = isWhiteTurn ? -999999.0 : 999999.0;
+    int? foundMateIn;
+    double alpha = -999999.0;
+    double beta = 999999.0;
 
     for (final m in moves) {
       final moveMap = m as Map;
@@ -297,7 +340,7 @@ class StockfishEngineService {
       final uci = '$from$to${promotion ?? ''}';
 
       chess.move({'from': from, 'to': to, 'promotion': promotion ?? 'q'});
-      final score = _alphaBeta(chess, depth - 1, -999999, 999999, !isWhiteTurn);
+      final score = _alphaBeta(chess, depth - 1, alpha, beta, !isWhiteTurn, 1);
       chess.undo();
 
       if (isWhiteTurn) {
@@ -305,17 +348,29 @@ class StockfishEngineService {
           bestScore = score;
           bestMoveUci = uci;
         }
+        alpha = max(alpha, bestScore);
       } else {
         if (score < bestScore) {
           bestScore = score;
           bestMoveUci = uci;
         }
+        beta = min(beta, bestScore);
       }
+      if (beta <= alpha) break;
+    }
+
+    // Check if score represents a forced checkmate
+    if (bestScore.abs() > 25000.0) {
+      final ply = (30000.0 - bestScore.abs()).round();
+      final mateMoves = max(1, (ply / 2).ceil());
+      foundMateIn = bestScore > 0 ? mateMoves : -mateMoves;
     }
 
     return EngineEvaluation(
       scoreCp: bestScore.clamp(-10000.0, 10000.0),
+      mateIn: foundMateIn,
       bestMoveUci: bestMoveUci,
+      pv: bestMoveUci.isNotEmpty ? [bestMoveUci] : [],
       depth: depth,
     );
   }
@@ -326,8 +381,12 @@ class StockfishEngineService {
     double alpha,
     double beta,
     bool isMaximizing,
+    int ply,
   ) {
-    if (chess.in_checkmate) return isMaximizing ? -10000.0 : 10000.0;
+    if (chess.in_checkmate) {
+      // Shorter mates score higher/lower so fastest mate is always preferred
+      return isMaximizing ? (-30000.0 + ply) : (30000.0 - ply);
+    }
     if (chess.in_draw) return 0.0;
     if (depth <= 0) return _evaluateHeuristic(chess);
 
@@ -335,24 +394,34 @@ class StockfishEngineService {
     if (moves.isEmpty) return _evaluateHeuristic(chess);
 
     if (isMaximizing) {
-      double maxEval = -999999;
+      double maxEval = -999999.0;
       for (final m in moves) {
         final moveMap = m as Map;
-        chess.move({'from': moveMap['from'], 'to': moveMap['to'], 'promotion': moveMap['promotion'] ?? 'q'});
-        final evaluation = _alphaBeta(chess, depth - 1, alpha, beta, false);
+        final from = moveMap['from'] as String;
+        final to = moveMap['to'] as String;
+        final promotion = moveMap['promotion'] as String?;
+
+        chess.move({'from': from, 'to': to, 'promotion': promotion ?? 'q'});
+        final evaluation = _alphaBeta(chess, depth - 1, alpha, beta, false, ply + 1);
         chess.undo();
+
         maxEval = max(maxEval, evaluation);
         alpha = max(alpha, evaluation);
         if (beta <= alpha) break;
       }
       return maxEval;
     } else {
-      double minEval = 999999;
+      double minEval = 999999.0;
       for (final m in moves) {
         final moveMap = m as Map;
-        chess.move({'from': moveMap['from'], 'to': moveMap['to'], 'promotion': moveMap['promotion'] ?? 'q'});
-        final evaluation = _alphaBeta(chess, depth - 1, alpha, beta, true);
+        final from = moveMap['from'] as String;
+        final to = moveMap['to'] as String;
+        final promotion = moveMap['promotion'] as String?;
+
+        chess.move({'from': from, 'to': to, 'promotion': promotion ?? 'q'});
+        final evaluation = _alphaBeta(chess, depth - 1, alpha, beta, true, ply + 1);
         chess.undo();
+
         minEval = min(minEval, evaluation);
         beta = min(beta, evaluation);
         if (beta <= alpha) break;
@@ -361,7 +430,6 @@ class StockfishEngineService {
     }
   }
 
-  /// Positional evaluation in centipawns
   double _evaluateHeuristic(chess_lib.Chess chess) {
     double total = 0.0;
 
@@ -371,7 +439,7 @@ class StockfishEngineService {
       'b': 330.0,
       'r': 500.0,
       'q': 900.0,
-      'k': 20000.0,
+      'k': 0.0, // Kings don't have relative piece value difference
     };
 
     final files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
@@ -392,7 +460,7 @@ class StockfishEngineService {
             posBonus += 10.0;
           }
 
-          // Development bonus for Knights & Bishops off the back rank
+          // Development bonus
           if (piece.type.name == 'n' || piece.type.name == 'b') {
             if (isW && r > 1) posBonus += 15.0;
             if (!isW && r < 8) posBonus += 15.0;
@@ -411,7 +479,6 @@ class StockfishEngineService {
   }
 
   void dispose() {
-    _stdoutSub?.cancel();
     try {
       _nativeStockfish?.dispose();
     } catch (_) {}

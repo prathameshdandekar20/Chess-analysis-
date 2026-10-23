@@ -128,7 +128,6 @@ class ChessBoardWidget extends StatelessWidget {
     bool isCheck = false;
     final piece = game.get(square);
     if (piece != null && piece.type == chess_lib.PieceType.KING) {
-      final isWhite = piece.color == chess_lib.Color.WHITE;
       if (game.in_check && game.turn == piece.color) {
         isCheck = true;
       }

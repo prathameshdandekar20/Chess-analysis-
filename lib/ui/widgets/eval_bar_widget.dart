@@ -24,13 +24,19 @@ class EvalBarWidget extends StatelessWidget {
     String label;
 
     if (mateIn != null) {
-      if (mateIn! > 0) {
+      if (mateIn == 0) {
+        whiteFraction = evalCp > 0 ? 1.0 : 0.0;
+        label = evalCp > 0 ? '1-0' : '0-1';
+      } else if (mateIn! > 0) {
         whiteFraction = 1.0;
         label = 'M${mateIn!.abs()}';
       } else {
         whiteFraction = 0.0;
         label = '-M${mateIn!.abs()}';
       }
+    } else if (evalCp.abs() >= 9000.0) {
+      whiteFraction = evalCp > 0 ? 1.0 : 0.0;
+      label = evalCp > 0 ? 'M1' : '-M1';
     } else {
       // Sigmoid mapping
       final winPercent = 1.0 / (1.0 + pow(10, -evalCp / 400.0));
@@ -54,10 +60,10 @@ class EvalBarWidget extends StatelessWidget {
       decoration: BoxDecoration(
         color: const Color(0xFF262421), // Black eval bar background
         borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: Colors.white.withOpacity(0.15), width: 1),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.15), width: 1),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.3),
+            color: Colors.black.withValues(alpha: 0.3),
             blurRadius: 4,
             offset: const Offset(1, 1),
           ),

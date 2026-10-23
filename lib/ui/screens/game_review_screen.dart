@@ -5,6 +5,7 @@ import '../../models/chess_move_eval.dart';
 import '../../models/game_review_data.dart';
 import '../../models/coach_profile.dart';
 import '../../services/sound_service.dart';
+import '../../services/coach_voice_service.dart';
 import '../theme/chess_theme.dart';
 import '../widgets/chess_board_widget.dart';
 import '../widgets/eval_bar_widget.dart';
@@ -54,6 +55,7 @@ class _GameReviewScreenState extends State<GameReviewScreen> {
   @override
   void dispose() {
     _playTimer?.cancel();
+    CoachVoiceService.instance.stop();
     super.dispose();
   }
 
@@ -81,6 +83,21 @@ class _GameReviewScreenState extends State<GameReviewScreen> {
         } else {
           SoundService.instance.playMove();
         }
+
+        // Speak Coach Commentary in Voice
+        final commentary = _currentCoach.generateCommentary(
+          classification: move.classification,
+          san: move.san,
+          bestMoveSan: move.bestMoveSan,
+          isWhite: move.isWhite,
+          evalAfterCp: move.evalAfter,
+          openingName: widget.reviewData.openingName,
+          captured: false,
+        );
+        CoachVoiceService.instance.speakCommentary(
+          commentary: commentary,
+          personality: _currentCoach.personality,
+        );
       }
     });
   }
@@ -245,6 +262,20 @@ class _GameReviewScreenState extends State<GameReviewScreen> {
       appBar: AppBar(
         title: const Text('Game Review'),
         actions: [
+          IconButton(
+            icon: Icon(
+              CoachVoiceService.instance.isMuted
+                  ? Icons.volume_off_rounded
+                  : Icons.volume_up_rounded,
+              color: CoachVoiceService.instance.isMuted ? Colors.white38 : _currentCoach.themeColor,
+            ),
+            tooltip: CoachVoiceService.instance.isMuted ? 'Unmute Coach Voice' : 'Mute Coach Voice',
+            onPressed: () {
+              setState(() {
+                CoachVoiceService.instance.toggleMute();
+              });
+            },
+          ),
           TextButton.icon(
             onPressed: _showCoachSelectionModal,
             icon: Text(_currentCoach.avatarEmoji, style: const TextStyle(fontSize: 18)),

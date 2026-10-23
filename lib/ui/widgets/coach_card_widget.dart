@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../models/chess_move_eval.dart';
 import '../../models/coach_profile.dart';
+import '../../services/coach_voice_service.dart';
 import '../theme/chess_theme.dart';
 import 'move_badge_widget.dart';
 
@@ -30,7 +31,7 @@ class CoachCardWidget extends StatelessWidget {
         decoration: BoxDecoration(
           color: ChessTheme.surfaceCard,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Colors.white.withOpacity(0.08)),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
         ),
         child: Row(
           children: [
@@ -43,10 +44,10 @@ class CoachCardWidget extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 12),
-            Expanded(
+            const Expanded(
               child: Text(
                 'Navigate through the game moves below or use playback controls.',
-                style: const TextStyle(color: ChessTheme.textSecondary, fontSize: 13),
+                style: TextStyle(color: ChessTheme.textSecondary, fontSize: 13),
               ),
             ),
           ],
@@ -74,12 +75,12 @@ class CoachCardWidget extends StatelessWidget {
         color: ChessTheme.surfaceCard,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: move.classification.color.withOpacity(0.4),
+          color: move.classification.color.withValues(alpha: 0.4),
           width: 1.5,
         ),
         boxShadow: [
           BoxShadow(
-            color: move.classification.color.withOpacity(0.12),
+            color: move.classification.color.withValues(alpha: 0.12),
             blurRadius: 8,
             offset: const Offset(0, 3),
           ),
@@ -103,7 +104,7 @@ class CoachCardWidget extends StatelessWidget {
                     border: Border.all(color: coach.themeColor, width: 1.8),
                     boxShadow: [
                       BoxShadow(
-                        color: coach.themeColor.withOpacity(0.3),
+                        color: coach.themeColor.withValues(alpha: 0.3),
                         blurRadius: 4,
                       ),
                     ],
@@ -141,7 +142,7 @@ class CoachCardWidget extends StatelessWidget {
                           child: Container(
                             padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                             decoration: BoxDecoration(
-                              color: coach.themeColor.withOpacity(0.18),
+                              color: coach.themeColor.withValues(alpha: 0.18),
                               borderRadius: BorderRadius.circular(4),
                             ),
                             child: Row(
@@ -174,11 +175,11 @@ class CoachCardWidget extends StatelessWidget {
               ),
               // Eval chip
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
                 decoration: BoxDecoration(
                   color: ChessTheme.surfaceElevated,
                   borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: Colors.white.withOpacity(0.1)),
+                  border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
                 ),
                 child: Text(
                   move.displayEval,
@@ -188,6 +189,28 @@ class CoachCardWidget extends StatelessWidget {
                     fontSize: 12,
                   ),
                 ),
+              ),
+              const SizedBox(width: 4),
+              // Voice Commentary Audio Button
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: Icon(
+                  CoachVoiceService.instance.isMuted
+                      ? Icons.volume_off_rounded
+                      : Icons.volume_up_rounded,
+                  color: CoachVoiceService.instance.isMuted ? Colors.white38 : coach.themeColor,
+                  size: 22,
+                ),
+                tooltip: CoachVoiceService.instance.isMuted ? 'Unmute Coach Voice' : 'Hear Coach Commentary',
+                onPressed: () {
+                  if (CoachVoiceService.instance.isMuted) {
+                    CoachVoiceService.instance.toggleMute();
+                  }
+                  CoachVoiceService.instance.speakCommentary(
+                    commentary: commentary,
+                    personality: coach.personality,
+                  );
+                },
               ),
             ],
           ),
@@ -238,7 +261,7 @@ class CoachCardWidget extends StatelessWidget {
                     ),
                     style: OutlinedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                      side: BorderSide(color: Colors.white.withOpacity(0.2)),
+                      side: BorderSide(color: Colors.white.withValues(alpha: 0.2)),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                     ),
                   ),

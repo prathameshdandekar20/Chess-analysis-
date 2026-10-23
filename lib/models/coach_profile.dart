@@ -95,6 +95,23 @@ class CoachProfile {
     required String openingName,
     required bool captured,
   }) {
+    if (san.contains('#')) {
+      switch (personality) {
+        case CoachPersonality.gotham:
+          return '👑 BOOM!! THAT IS CHECKMATE! GAME OVER! Clean finish with $san!';
+        case CoachPersonality.grandmaster:
+          return '👑 Beautiful checkmate! $san concludes the game with grandmaster accuracy.';
+        case CoachPersonality.roast:
+          return '👑 Wow, you actually found checkmate with $san. Even a broken clock is right twice a day.';
+        case CoachPersonality.encouraging:
+          return '👑 Checkmate! Stunning finish with $san, congratulations!';
+        case CoachPersonality.ruthless:
+          return '👑 Checkmate. $san is completely clinical, game over.';
+        case CoachPersonality.classic:
+          return '👑 Checkmate! $san delivers a decisive victory.';
+      }
+    }
+
     switch (personality) {
       case CoachPersonality.gotham:
         return _gothamCommentary(classification, san, bestMoveSan, openingName, captured);
