@@ -107,7 +107,6 @@ class CoachProfile {
       case CoachPersonality.ruthless:
         return _magnusCommentary(classification, san, bestMoveSan, openingName, captured);
       case CoachPersonality.classic:
-      default:
         return _classicCommentary(classification, san, bestMoveSan, openingName, captured);
     }
   }
